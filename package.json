@@ -5,7 +5,9 @@
     "build": "tsc",
     "watch": "tsc -w",
     "test": "jest",
-    "cdk": "cdk"
+    "cdk": "cdk",
+    "build-images": "scripts/build-images.sh",
+    "benchmark": "ts-node --prefer-ts-exts scripts/run-benchmark.ts"
   },
   "devDependencies": {
     "@types/jest": "^30",

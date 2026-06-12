@@ -6,3 +6,9 @@ node_modules
 # CDK asset staging directory
 .cdk.staging
 cdk.out
+cdk.context.json
+
+# Benchmark output
+.benchmark-build
+results
+.DS_Store
