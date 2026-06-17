@@ -25,6 +25,18 @@ test('creates benchmark repositories, clusters, capacity providers, and task def
   template.resourceCountIs('AWS::ECS::Cluster', 5);
   template.resourceCountIs('AWS::ECS::CapacityProvider', 4);
   template.resourceCountIs('AWS::ECS::TaskDefinition', 40);
+  template.resourcePropertiesCountIs('AWS::AutoScaling::LaunchConfiguration', {
+    BlockDeviceMappings: [
+      {
+        DeviceName: '/dev/xvda',
+        Ebs: {
+          Encrypted: true,
+          VolumeSize: 300,
+          VolumeType: 'gp3',
+        },
+      },
+    ],
+  }, 4);
 
   template.hasResourceProperties('AWS::ECR::Repository', {
     RepositoryName: 'test-css-images',
@@ -35,6 +47,9 @@ test('creates benchmark repositories, clusters, capacity providers, and task def
     RequiresCompatibilities: ['FARGATE'],
     Cpu: '1024',
     Memory: '2048',
+    EphemeralStorage: {
+      SizeInGiB: 100,
+    },
     RuntimePlatform: {
       CpuArchitecture: 'X86_64',
       OperatingSystemFamily: 'LINUX',
@@ -53,4 +68,16 @@ test('creates benchmark repositories, clusters, capacity providers, and task def
   template.resourcePropertiesCountIs('AWS::ECS::TaskDefinition', {
     Family: 'test-css-arm64-large-zstd-soci-ec2',
   }, 0);
+
+  const launchConfigurations = template.findResources('AWS::AutoScaling::LaunchConfiguration');
+  const bottlerocketUserData = Object.entries(launchConfigurations)
+    .filter(([logicalId]) => logicalId.startsWith('Bottlerocket'))
+    .map(([, resource]) => JSON.stringify(resource.Properties.UserData));
+
+  expect(bottlerocketUserData).toHaveLength(2);
+  for (const userData of bottlerocketUserData) {
+    expect(userData).toContain('[settings.ecs]');
+    expect(userData).toContain('cluster = \\"');
+    expect(userData).not.toContain('/etc/ecs/ecs.config');
+  }
 });

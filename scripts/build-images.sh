@@ -3,9 +3,8 @@ set -euo pipefail
 
 STACK_NAME="${STACK_NAME:-ContainerStartSpeedStack}"
 REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
-SMALL_MB="${SMALL_MB:-192}"
-LARGE_MB="${LARGE_MB:-1920}"
-MODULE_COUNT="${MODULE_COUNT:-384}"
+SMALL_REQUIREMENTS_FILE="${SMALL_REQUIREMENTS_FILE:-requirements-small.txt}"
+LARGE_REQUIREMENTS_FILE="${LARGE_REQUIREMENTS_FILE:-requirements-large.txt}"
 ARCHITECTURES="${ARCHITECTURES:-x86_64,arm64}"
 WORK_DIR="${WORK_DIR:-.benchmark-build}"
 BUILDX_BUILDER="${BUILDX_BUILDER:-container-start-speed}"
@@ -100,6 +99,26 @@ run_soci_convert() {
   docker "${docker_args[@]}"
 }
 
+verify_soci_push() {
+  local tag="$1"
+  local tag_manifest_type
+  local soci_artifact_count
+
+  tag_manifest_type="$(aws ecr describe-images \
+    --region "${REGION}" \
+    --repository-name "${REPOSITORY_URI##*/}" \
+    --image-ids "imageTag=${tag}" \
+    --query "imageDetails[0].imageManifestMediaType" \
+    --output text)"
+  soci_artifact_count="$(aws ecr describe-images \
+    --region "${REGION}" \
+    --repository-name "${REPOSITORY_URI##*/}" \
+    --query "length(imageDetails[?artifactMediaType=='application/vnd.amazon.soci.index.v2+json'])" \
+    --output text)"
+
+  echo "Pushed ${tag}: manifestType=${tag_manifest_type}, repositorySociArtifacts=${soci_artifact_count}"
+}
+
 build_one() {
   local cpu_architecture="$1"
   local platform="$2"
@@ -107,7 +126,8 @@ build_one() {
   local size="$4"
   local compression="$5"
   local soci_mode="$6"
-  local target_mb="$7"
+  local requirements_file="$7"
+  local dependency_profile="$8"
   local tag="${cpu_architecture}-${size}-${compression}-${soci_mode}"
   local source_archive="${WORK_DIR}/${tag}.oci.tar"
   local soci_archive="${WORK_DIR}/${tag}.soci.oci.tar"
@@ -117,13 +137,12 @@ build_one() {
     compression_option="uncompressed"
   fi
 
-  echo "Building ${REPOSITORY_URI}:${tag} (${platform}, ${target_mb} MiB payload, ${compression}, ${soci_mode})"
+  echo "Building ${REPOSITORY_URI}:${tag} (${platform}, ${requirements_file}, ${compression}, ${soci_mode})"
   docker buildx build \
     --builder "${BUILDX_BUILDER}" \
     --platform "${platform}" \
-    --build-arg "TARGET_MB=${target_mb}" \
-    --build-arg "READ_MB=${target_mb}" \
-    --build-arg "MODULE_COUNT=${MODULE_COUNT}" \
+    --build-arg "REQUIREMENTS_FILE=${requirements_file}" \
+    --build-arg "DEPENDENCY_PROFILE=${dependency_profile}" \
     --build-arg "VARIANT_TAG=${tag}" \
     --provenance=false \
     --sbom=false \
@@ -133,7 +152,9 @@ build_one() {
   if [[ "${soci_mode}" == "soci" ]]; then
     echo "Converting ${tag} to SOCI-enabled OCI image"
     run_soci_convert "${platform}" "${source_archive}" "${soci_archive}"
-    skopeo copy --override-os linux --override-arch "${skopeo_arch}" "oci-archive:${soci_archive}" "docker://${REPOSITORY_URI}:${tag}"
+    # --all is important to preserve the SOCI index manifest v2 
+    skopeo copy --all "oci-archive:${soci_archive}" "docker://${REPOSITORY_URI}:${tag}"
+    verify_soci_push "${tag}"
   else
     skopeo copy --override-os linux --override-arch "${skopeo_arch}" "oci-archive:${source_archive}" "docker://${REPOSITORY_URI}:${tag}"
   fi
@@ -153,15 +174,17 @@ for cpu_architecture in "${architecture_list[@]}"; do
 
   for size in small large; do
     if [[ "${size}" == "small" ]]; then
-      target_mb="${SMALL_MB}"
+      requirements_file="${SMALL_REQUIREMENTS_FILE}"
+      dependency_profile="small"
     else
-      target_mb="${LARGE_MB}"
+      requirements_file="${LARGE_REQUIREMENTS_FILE}"
+      dependency_profile="large"
     fi
 
     for image_format in gzip:plain gzip:soci zstd:plain uncompressed:plain uncompressed:soci; do
       compression="${image_format%%:*}"
       soci_mode="${image_format##*:}"
-      build_one "${cpu_architecture}" "${platform}" "${skopeo_arch}" "${size}" "${compression}" "${soci_mode}" "${target_mb}"
+      build_one "${cpu_architecture}" "${platform}" "${skopeo_arch}" "${size}" "${compression}" "${soci_mode}" "${requirements_file}" "${dependency_profile}"
     done
   done
 done

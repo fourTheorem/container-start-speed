@@ -1,0 +1,9 @@
+-r requirements-small.txt
+pyarrow
+scipy
+scikit-learn
+torch
+xgboost
+opencv-python-headless
+transformers
+safetensors

@@ -29,7 +29,8 @@ export class ContainerStartSpeedStack extends cdk.Stack {
     const ec2X86InstanceType = this.node.tryGetContext('ec2X86InstanceType') ?? 'm7i.large';
     const ec2ArmInstanceType = this.node.tryGetContext('ec2ArmInstanceType') ?? 'm7g.large';
     const maxEc2Instances = Number(this.node.tryGetContext('maxEc2Instances') ?? 8);
-    const ec2RootVolumeGiB = Number(this.node.tryGetContext('ec2RootVolumeGiB') ?? 100);
+    const ec2RootVolumeGiB = Number(this.node.tryGetContext('ec2RootVolumeGiB') ?? 300);
+    const fargateEphemeralStorageGiB = Number(this.node.tryGetContext('fargateEphemeralStorageGiB') ?? 100);
     const vpcId = requiredContext(this, 'vpcId');
     const subnetIds = parseCsvContext(this, 'subnetIds');
     const availabilityZones = syntheticAvailabilityZones(this.region, subnetIds.length);
@@ -111,6 +112,7 @@ export class ContainerStartSpeedStack extends cdk.Stack {
       machineImage: new ecs.BottleRocketImage({
         variant: ecs.BottlerocketEcsVariant.AWS_ECS_2,
       }),
+      machineImageType: ecs.MachineImageType.BOTTLEROCKET,
     });
 
     const bottlerocketArmCluster = this.createEc2Cluster({
@@ -126,6 +128,7 @@ export class ContainerStartSpeedStack extends cdk.Stack {
       machineImage: ec2.MachineImage.fromSsmParameter('/aws/service/bottlerocket/aws-ecs-2/arm64/latest/image_id', {
         os: ec2.OperatingSystemType.LINUX,
       }),
+      machineImageType: ecs.MachineImageType.BOTTLEROCKET,
     });
 
     for (const cpuArchitecture of CPU_ARCHITECTURES) {
@@ -146,6 +149,7 @@ export class ContainerStartSpeedStack extends cdk.Stack {
             size,
             compression,
             sociMode,
+            fargateEphemeralStorageGiB,
           });
 
           this.createEc2TaskDefinition({
@@ -187,6 +191,7 @@ export class ContainerStartSpeedStack extends cdk.Stack {
     maxEc2Instances: number;
     ec2RootVolumeGiB: number;
     machineImage: ec2.IMachineImage;
+    machineImageType?: ecs.MachineImageType;
   }): { cluster: ecs.Cluster; capacityProvider: ecs.AsgCapacityProvider } {
     const cluster = new ecs.Cluster(this, `${props.idPrefix}Cluster`, {
       vpc: props.vpc,
@@ -217,6 +222,7 @@ export class ContainerStartSpeedStack extends cdk.Stack {
       enableManagedTerminationProtection: false,
       targetCapacityPercent: 100,
       instanceWarmupPeriod: 60,
+      machineImageType: props.machineImageType,
     });
     cluster.addAsgCapacityProvider(capacityProvider);
 
@@ -237,12 +243,12 @@ export class ContainerStartSpeedStack extends cdk.Stack {
     });
   }
 
-  private createFargateTaskDefinition(props: TaskDefinitionProps) {
+  private createFargateTaskDefinition(props: TaskDefinitionProps & { fargateEphemeralStorageGiB: number }) {
     const taskDefinition = new ecs.FargateTaskDefinition(this, props.id, {
       family: props.family,
       cpu: 1024,
       memoryLimitMiB: 2048,
-      ephemeralStorageGiB: 50,
+      ephemeralStorageGiB: props.fargateEphemeralStorageGiB,
       runtimePlatform: {
         cpuArchitecture: ecsCpuArchitecture(props.cpuArchitecture),
         operatingSystemFamily: ecs.OperatingSystemFamily.LINUX,
