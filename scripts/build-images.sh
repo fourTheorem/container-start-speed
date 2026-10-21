@@ -41,11 +41,12 @@ fi
 
 command -v docker >/dev/null || { echo "docker is required." >&2; exit 1; }
 command -v aws >/dev/null || { echo "aws CLI is required." >&2; exit 1; }
-command -v skopeo >/dev/null || { echo "skopeo is required for OCI archive push/copy." >&2; exit 1; }
+command -v crane >/dev/null || { echo "crane is required for OCI archive pushes." >&2; exit 1; }
+command -v jq >/dev/null || { echo "jq is required." >&2; exit 1; }
 
 REGISTRY="${REPOSITORY_URI%/*}"
 aws ecr get-login-password --region "${REGION}" | docker login --username AWS --password-stdin "${REGISTRY}"
-aws ecr get-login-password --region "${REGION}" | skopeo login --username AWS --password-stdin "${REGISTRY}"
+aws ecr get-login-password --region "${REGION}" | crane auth login "${REGISTRY}" --username AWS --password-stdin
 
 mkdir -p "${WORK_DIR}"
 
@@ -119,15 +120,47 @@ verify_soci_push() {
   echo "Pushed ${tag}: manifestType=${tag_manifest_type}, repositorySociArtifacts=${soci_artifact_count}"
 }
 
+prepare_crane_layout() {
+  local archive="$1"
+  local layout_dir="$2"
+  local nested_digest
+
+  rm -rf "${layout_dir}"
+  mkdir -p "${layout_dir}"
+  tar -xf "${archive}" -C "${layout_dir}"
+
+  # soci convert writes an OCI archive whose top-level index points at another
+  # OCI index. Push the nested index as the tag target so ECR sees the image
+  # manifest and SOCI artifact as direct index entries.
+  nested_digest="$(jq -r '
+    if (.manifests | length) == 1 and .manifests[0].mediaType == "application/vnd.oci.image.index.v1+json"
+    then .manifests[0].digest
+    else empty
+    end
+  ' "${layout_dir}/index.json")"
+
+  if [[ -n "${nested_digest}" ]]; then
+    cp "${layout_dir}/blobs/sha256/${nested_digest#sha256:}" "${layout_dir}/index.json"
+  fi
+}
+
+push_oci_archive_with_crane() {
+  local archive="$1"
+  local tag="$2"
+  local layout_dir="${WORK_DIR}/push-${tag}"
+
+  prepare_crane_layout "${archive}" "${layout_dir}"
+  crane push --index "${layout_dir}" "${REPOSITORY_URI}:${tag}"
+}
+
 build_one() {
   local cpu_architecture="$1"
   local platform="$2"
-  local skopeo_arch="$3"
-  local size="$4"
-  local compression="$5"
-  local soci_mode="$6"
-  local requirements_file="$7"
-  local dependency_profile="$8"
+  local size="$3"
+  local compression="$4"
+  local soci_mode="$5"
+  local requirements_file="$6"
+  local dependency_profile="$7"
   local tag="${cpu_architecture}-${size}-${compression}-${soci_mode}"
   local source_archive="${WORK_DIR}/${tag}.oci.tar"
   local soci_archive="${WORK_DIR}/${tag}.soci.oci.tar"
@@ -152,11 +185,10 @@ build_one() {
   if [[ "${soci_mode}" == "soci" ]]; then
     echo "Converting ${tag} to SOCI-enabled OCI image"
     run_soci_convert "${platform}" "${source_archive}" "${soci_archive}"
-    # --all is important to preserve the SOCI index manifest v2 
-    skopeo copy --all "oci-archive:${soci_archive}" "docker://${REPOSITORY_URI}:${tag}"
+    push_oci_archive_with_crane "${soci_archive}" "${tag}"
     verify_soci_push "${tag}"
   else
-    skopeo copy --override-os linux --override-arch "${skopeo_arch}" "oci-archive:${source_archive}" "docker://${REPOSITORY_URI}:${tag}"
+    push_oci_archive_with_crane "${source_archive}" "${tag}"
   fi
 }
 
@@ -167,8 +199,8 @@ ensure_soci_runner
 
 for cpu_architecture in "${architecture_list[@]}"; do
   case "${cpu_architecture}" in
-    x86_64) platform="linux/amd64"; skopeo_arch="amd64" ;;
-    arm64) platform="linux/arm64"; skopeo_arch="arm64" ;;
+    x86_64) platform="linux/amd64" ;;
+    arm64) platform="linux/arm64" ;;
     *) echo "Unsupported architecture: ${cpu_architecture}. Use x86_64 or arm64." >&2; exit 1 ;;
   esac
 
@@ -184,7 +216,7 @@ for cpu_architecture in "${architecture_list[@]}"; do
     for image_format in gzip:plain gzip:soci zstd:plain uncompressed:plain uncompressed:soci; do
       compression="${image_format%%:*}"
       soci_mode="${image_format##*:}"
-      build_one "${cpu_architecture}" "${platform}" "${skopeo_arch}" "${size}" "${compression}" "${soci_mode}" "${requirements_file}" "${dependency_profile}"
+      build_one "${cpu_architecture}" "${platform}" "${size}" "${compression}" "${soci_mode}" "${requirements_file}" "${dependency_profile}"
     done
   done
 done

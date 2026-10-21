@@ -7,6 +7,7 @@
     "test": "jest",
     "cdk": "cdk",
     "build-images": "scripts/build-images.sh",
+    "verify-images": "ts-node --prefer-ts-exts scripts/verify-images.ts",
     "benchmark": "ts-node --prefer-ts-exts scripts/run-benchmark.ts"
   },
   "devDependencies": {
